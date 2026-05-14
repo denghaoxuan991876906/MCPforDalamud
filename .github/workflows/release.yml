@@ -1,0 +1,46 @@
+name: Release
+on:
+  push:
+    tags:
+      - '*.*.*.*'
+
+jobs:
+  Release:
+    permissions:
+      contents: write
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Get tag
+        run: |
+          $tag = "${{ github.ref }}" -replace 'refs/tags/', ''
+          "tag=$tag" | Out-File -Append -FilePath $env:GITHUB_ENV
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Download Dalamud Hooks
+        run: |
+          Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile dalamud.zip
+          Expand-Archive -Force dalamud.zip "$env:AppData\XIVLauncherCN\addon\Hooks\dev"
+
+      - name: Restore
+        run: dotnet restore MCPforDalamud/MCPforDalamud.csproj
+
+      - name: Build
+        run: dotnet build --no-restore -c Release MCPforDalamud/MCPforDalamud.csproj -p:Version=${{ env.tag }} --output .\build
+
+      - name: Cleanup output
+        run: Get-ChildItem .\build\* -Exclude MCPforDalamud.* | Remove-Item -Force -Recurse
+
+      - name: Zip plugin
+        run: Compress-Archive -Path .\build\* -DestinationPath .\build\MCPforDalamud.zip
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ./build/MCPforDalamud.zip

@@ -1,0 +1,20 @@
+<Project Sdk="Dalamud.CN.NET.Sdk/15.0.0">
+    <PropertyGroup>
+        <Authors>嗨呀</Authors>
+        <Version>0.1.0.0</Version>
+        <Description>MCP服务插件，让AI获取FFXIV游戏实时数据</Description>
+    </PropertyGroup>
+    <PropertyGroup>
+        <Nullable>enable</Nullable>
+        <LangVersion>latest</LangVersion>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+        <NoWarn>CS0618</NoWarn>
+    </PropertyGroup>
+    <ItemGroup>
+        <Content Include="MCPforDalamud.json">
+            <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+        </Content>
+    </ItemGroup>
+</Project>

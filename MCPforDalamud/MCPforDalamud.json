@@ -1,0 +1,17 @@
+{
+    "Author": "嗨呀",
+    "Name": "MCP for Dalamud",
+    "Punchline": "MCP服务插件",
+    "Description": "MCP(Model Context Protocol)服务插件，让AI工具获取FFXIV游戏实时数据、操作角色/系统，以及与插件交互测试。",
+    "InternalName": "MCPforDalamud",
+    "AssemblyVersion": "0.1.0.0",
+    "ApplicableVersion": "any",
+    "Tags": ["utility", "mcp", "ai", "development"],
+    "DalamudApiLevel": 15,
+    "LoadRequiredState": 0,
+    "LoadSync": false,
+    "CanUnloadAsync": false,
+    "LoadPriority": 0,
+    "IconUrl": "",
+    "Changelog": "预览版：44个MCP工具"
+}

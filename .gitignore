@@ -1,0 +1,12 @@
+/MCPforDalamud/obj
+/MCPforDalamud/bin
+/MCPforDalamud/packages.lock.json
+/MCPforDalamud/.idea
+/MCPforDalamud.Tests
+/.superpowers
+/docs
+*.ps1
+test-mcp.sh
+tmp.json
+mcp-bridge.py
+mcp-bridge.sh

@@ -1,0 +1,23 @@
+using System.Text.Json;
+using Dalamud.Plugin;
+using MCPforDalamud.Ipc;
+using MCPforDalamud.McpServer;
+
+namespace MCPforDalamud.Tools;
+
+public static class PluginBridgeTools
+{
+    private static PushDataBuffer? _pushBuffer;
+    private static IpcEndpointRegistry? _endpointRegistry;
+    public static void Initialize(PushDataBuffer pushBuffer, IpcEndpointRegistry endpointRegistry) { _pushBuffer = pushBuffer; _endpointRegistry = endpointRegistry; }
+
+    public static void Register(ToolRegistry registry)
+    {
+        registry.Register(new ToolDefinition { Name = "query_push_data", Description = "查询其他插件推送的数据缓存", InputSchema = JsonSerializer.SerializeToElement(new { type = "object", properties = new { key = new { type = "string" }, count = new { type = "integer" } } }), Handler = args => { if (_pushBuffer == null) return new { error = "PushData 缓冲区未初始化" }; var key = args?.TryGetProperty("key", out var k) == true ? k.GetString() : null; var count = args?.TryGetProperty("count", out var c) == true ? c.GetInt32() : 50; var entries = _pushBuffer.Query(key, count); return new { entries, total = _pushBuffer.Count }; } });
+        registry.Register(new ToolDefinition { Name = "register_ipc_endpoint", Description = "注册已知的插件 IPC 接口", InputSchema = JsonSerializer.SerializeToElement(new { type = "object", properties = new { pluginName = new { type = "string" }, methodName = new { type = "string" }, signature = new { type = "string" }, description = new { type = "string" } }, required = new[] { "pluginName", "methodName", "signature" } }), Handler = args => { if (_endpointRegistry == null) return new { error = "端点注册表未初始化" }; var pn = args?.GetProperty("pluginName").GetString() ?? ""; var mn = args?.GetProperty("methodName").GetString() ?? ""; var sig = args?.GetProperty("signature").GetString() ?? ""; var desc = args?.TryGetProperty("description", out var d) == true ? d.GetString() ?? "" : ""; _endpointRegistry.Register(pn, mn, sig, desc); return new { success = true }; } });
+        registry.Register(new ToolDefinition { Name = "call_plugin_ipc", Description = "调用已注册的插件 IPC 接口", InputSchema = JsonSerializer.SerializeToElement(new { type = "object", properties = new { pluginName = new { type = "string" }, methodName = new { type = "string" }, arguments = new { type = "object" } }, required = new[] { "pluginName", "methodName" } }), Handler = args => { if (_endpointRegistry == null) return new { error = "端点注册表未初始化" }; var pn = args?.GetProperty("pluginName").GetString() ?? ""; var mn = args?.GetProperty("methodName").GetString() ?? ""; var endpoint = _endpointRegistry.Find(pn, mn); if (endpoint == null) return new { error = string.Format("未注册的端点: {0}.{1}", pn, mn) }; var ipcName = string.Format("{0}.{1}", pn, mn); try { var pi = Service.PluginInterface; object? result = null; if (endpoint.Signature.Contains("Action")) { var sub = TryGetSubscriber(pi, ipcName, endpoint.Signature); if (sub != null) { var invoke = sub.GetType().GetMethod("InvokeAction"); invoke?.Invoke(sub, null); result = "invoked"; } } else { var sub = TryGetSubscriber(pi, ipcName, endpoint.Signature); if (sub != null) { var invoke = sub.GetType().GetMethod("InvokeFunc"); if (args?.TryGetProperty("arguments", out var argElem) == true) { var argObj = JsonSerializer.Deserialize<object>(argElem.GetRawText()); result = invoke?.Invoke(sub, new[] { argObj }); } else { result = invoke?.Invoke(sub, null); } } } return new { success = true, pluginName = pn, methodName = mn, result = result?.ToString() ?? "" }; } catch (Exception ex) { return new { success = false, pluginName = pn, methodName = mn, error = ex.Message }; } } });
+        registry.Register(new ToolDefinition { Name = "list_ipc_endpoints", Description = "列出已注册的 IPC 端点", InputSchema = JsonSerializer.SerializeToElement(new { type = "object", properties = new { pluginName = new { type = "string" } } }), Handler = args => { if (_endpointRegistry == null) return new { error = "端点注册表未初始化" }; var pn = args?.TryGetProperty("pluginName", out var p) == true ? p.GetString() : null; var endpoints = _endpointRegistry.List(pn); return new { count = endpoints.Count, endpoints }; } });
+    }
+
+    private static object? TryGetSubscriber(IDalamudPluginInterface pi, string ipcName, string signature) { var getSub = pi.GetType().GetMethods().FirstOrDefault(m => m.Name == "GetIpcSubscriber" && m.GetParameters().Length == 1); if (getSub == null) return null; try { if (signature.Contains("_")) { var generic = getSub.MakeGenericMethod(typeof(string), typeof(string)); return generic.Invoke(pi, new object[] { ipcName }); } else { var generic = getSub.MakeGenericMethod(typeof(object)); return generic.Invoke(pi, new object[] { ipcName }); } } catch { return null; } }
+}

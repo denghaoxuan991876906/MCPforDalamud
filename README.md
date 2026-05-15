@@ -20,7 +20,7 @@ cmd.exe /c "cd /d E:\MCPforDalamud && dotnet build MCPforDalamud\MCPforDalamud.c
 
 `/mcp` 打开设置面板。
 
-## 工具列表 (44个)
+## 工具列表 (45个)
 
 **数据读取** (22): get_player_status, get_condition, get_player_stats, get_job_gauge, get_target_info, get_focus_target, get_soft_target, get_enemy_list, get_party_list, get_buddy_list, get_nearby_players, get_nearby_npcs, get_territory_info, get_aetheryte_list, get_fate_list, get_duty_state, get_inventory, get_equipment, get_currency, list_excel_sheets, search_excel_sheet, get_excel_row
 
@@ -30,9 +30,29 @@ cmd.exe /c "cd /d E:\MCPforDalamud && dotnet build MCPforDalamud\MCPforDalamud.c
 
 **插件桥接** (4): query_push_data, register_ipc_endpoint, call_plugin_ipc, list_ipc_endpoints
 
+**插件管理** (1): manage_plugin
+
 **聊天** (1): send_chat
 
 **移动** (4): automove_on, automove_off, face_target, move_to_target
+
+## 插件管理
+
+`manage_plugin` 通过游戏聊天系统发送 Dalamud 命令来管理插件。命令和聊天消息都走 `ProcessChatBox`，`/` 前缀自动路由。
+
+```
+manage_plugin:
+  参数:
+    action: "load" | "unload" | "reload" | "all"
+    pluginName: string     unload/reload 时的插件 InternalName
+    filePath:   string     load/reload 时 DLL 完整路径（用于 /xldev load）
+```
+
+**示例:**
+- 卸载: `{"action":"unload", "pluginName":"MCPforDalamud"}`
+- 加载: `{"action":"load", "filePath":"E:\\plugin\\MCPforDalamud.dll"}`
+- 重载: `{"action":"reload", "pluginName":"MCPforDalamud", "filePath":"E:\\plugin\\MCPforDalamud.dll"}`
+- 全部重载: `{"action":"all"}`
 
 ## 事件缓存系统
 

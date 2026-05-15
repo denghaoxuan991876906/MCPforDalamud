@@ -34,11 +34,144 @@ cmd.exe /c "cd /d E:\MCPforDalamud && dotnet build MCPforDalamud\MCPforDalamud.c
 
 **移动** (4): automove_on, automove_off, face_target, move_to_target
 
+## 事件缓存系统
+
+插件每帧检测游戏状态变化，生成事件写入 2000 条环形缓冲区。AI 通过 `query_events` 按需查询，无需轮询。
+
+### query_events
+
+```
+参数:
+  types: string[]      可选，筛选事件类型（见下方事件类型表），null=全部
+  count: int           可选，返回条数，默认50，最大500
+  since: int           可选，起始时间戳(ms)
+  before: int          可选，截止时间戳(ms)
+```
+
+### 事件类型（21种）
+
+| 类型 | 说明 | 触发 |
+|------|------|------|
+| `hp_change` | HP变化 | CurrentHp 与上次不同 |
+| `mp_change` | MP变化 | CurrentMp 与上次不同 |
+| `gp_change` | GP变化 | CurrentGp 与上次不同 |
+| `player_move` | 角色移动 | 坐标变化 > 0.5m |
+| `job_change` | 职业切换 | ClassJob.RowId 变化 |
+| `target_change` | 目标切换 | Target GameObjectId 变化 |
+| `focus_target_change` | 焦点目标切换 | FocusTarget 变化 |
+| `combat_action` | 技能执行 | 角色或目标使用技能 |
+| `combat_damage` | 伤害事件 | 目标HP下降 |
+| `combat_buff` | Buff变化 | StatusList 增删 |
+| `combat_cast` | 施法事件 | 开始或取消施法 |
+| `combat_start` | 战斗开始 | Condition.InCombat 变 true |
+| `combat_end` | 战斗结束 | Condition.InCombat 变 false |
+| `map_change` | 地图切换 | TerritoryType 变化 |
+| `mount_change` | 骑乘切换 | Condition.Mounted 变化 |
+| `chat_message` | 聊天消息 | 收到聊天消息 |
+| `duty_update` | 副本状态变化 | DutyState.IsDutyStarted 变化 |
+| `fate_update` | FATE状态变化 | 附近FATE增删或进度变化 |
+| `nearby_enemy` | 周围敌人 | 检测范围内敌对目标变化 |
+| `nearby_player` | 周围玩家 | 检测范围内玩家增删 |
+| `system_notification` | 系统通知 | 过场动画、任务更新等 |
+
+### configure_event_collection
+
+动态调整采集策略，减少无关事件：
+
+```
+参数 config 字段:
+  playerStats: string[]     采集的属性 ["hp","mp","job","position"]，默认全开
+  targetStats: string[]     目标属性 ["hp","type","targetChange"]，默认全开
+  objectRange: int          环境检测范围(米)，默认30，0=关闭
+  objectTypes: string[]     环境对象类型 ["enemy","player","npc","gathering"]，默认["enemy"]
+  nearbyPlayerRange: int    周围玩家检测范围(米)，默认0(关闭)
+  combatEvents: string[]    战斗事件 ["action","damage","buff","cast","startEnd"]，默认["action","damage","startEnd"]
+  systemEvents: string[]    系统事件 ["duty","fate","chat","item","quest"]，默认["duty","fate"]
+  throttleMs: int           同类事件最小间隔(ms)，默认500
+```
+
+### get_event_config
+
+返回当前采集配置和缓冲区状态（bufferSize, maxBufferSize）。
+
+## 插件桥接系统
+
+让 MCP 插件与开发中的其他插件双向通信。
+
+### 其他插件推送数据到 MCP
+
+```csharp
+// 通过 IPC 推送键值对数据到 MCP 的 2000 条环形缓存
+var sub = pluginInterface.GetIpcSubscriber<string, object?>("MCPforDalamud.PushData");
+
+// 数据格式: {"key": "分类键", "data": "任意JSON数据"}
+sub.InvokeFunc("{\"key\":\"myPlugin.status\",\"data\":\"{\\\"hp\\\":12345}\"}");
+```
+
+插件启动时自动注册 `MCPforDalamud.PushData` IPC 接口（`Func<string, object?>` 签名），其他插件通过 `GetIpcSubscriber` 获取并调用即可推送数据。
+
+### AI 查询推送数据
+
+```
+query_push_data:
+  参数:
+    key: string    可选，筛选指定 key
+    count: int     可选，默认50
+  返回:
+    entries: [{key, data, timestamp, id}]
+    total: int
+```
+
+### AI 调用其他插件 IPC
+
+三步工作流：
+
+**1. 注册已知端点**
+```
+register_ipc_endpoint:
+  参数:
+    pluginName: "BossModReborn"     插件 InternalName
+    methodName: "Presets.GetActive"  IPC方法名
+    signature:   "Func_string"      签名模板（如 Func_string, Func_bool, Action_bool, Func_int_string）
+    description: "获取当前Preset"   功能描述
+```
+
+**2. 查询已注册端点**
+```
+list_ipc_endpoints:
+  参数:
+    pluginName: string   可选筛选
+  返回:
+    [{pluginName, methodName, signature, description}]
+```
+
+**3. 调用端点**
+```
+call_plugin_ipc:
+  参数:
+    pluginName: "BossModReborn"
+    methodName: "Presets.GetActive"
+    arguments:  {}              可选JSON参数
+  返回:
+    success: boolean
+    result:  string             调用返回值
+```
+
+### 签名模板说明
+
+| 模板 | 含义 |
+|------|------|
+| `Func_bool` | 无参数，返回 bool |
+| `Func_string` | 无参数，返回 string |
+| `Func_int_string` | 入参 int，返回 string |
+| `Action_bool` | 入参 bool，无返回 |
+| `Func_bool_string` | 入参 bool，返回 string |
+
 ## 其他插件接入
 
 ```csharp
 // 推送数据到 MCP
-var sub = pluginInterface.GetIpcSubscriber<string>("MCPforDalamud.PushData");
+var sub = pluginInterface.GetIpcSubscriber<string, object?>("MCPforDalamud.PushData");
 sub.InvokeFunc("{\"key\":\"mykey\",\"data\":\"some data\"}");
 ```
 

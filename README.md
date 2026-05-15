@@ -187,10 +187,49 @@ call_plugin_ipc:
 | `Action_bool` | 入参 bool，无返回 |
 | `Func_bool_string` | 入参 bool，返回 string |
 
+## 典型用例
+
+### AI 自动化测试插件新功能
+
+开发插件时，在关键节点向 MCP 推送数据，AI 结合游戏状态自动验证功能是否正常。
+
+**被测插件代码：**
+```csharp
+// 第一步：推送测试开始标记
+var ipc = pluginInterface.GetIpcSubscriber<string, object?>("MCPforDalamud.PushData");
+ipc.InvokeFunc("{\"key\":\"myPlugin.test.autoDismount\",\"data\":\"{\\\"phase\\\":\\\"start\\\",\\\"expected\\\":\\\"dismount_on_aggro\\\"}\"}");
+
+// 第二步：执行功能逻辑（如检测到进战自动下马）
+var wasMounted = Condition[ConditionFlag.Mounted];
+AutoDismountFeature.Execute(); // 被测功能
+
+// 第三步：推送结果
+ipc.InvokeFunc($"{{\"key\":\"myPlugin.test.autoDismount\",\"data\":\"{{ \\\"phase\\\":\\\"result\\\", \\\"wasMounted\\\":{wasMounted.ToString().ToLower()}, \\\"executedAt\\\":{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()} }}\"}}");
+```
+
+**AI 验证流程：**
+```
+1. AI 调用 query_push_data(key="myPlugin.test.autoDismount")  → 读到 start + result
+2. AI 调用 query_events(types=["combat_start","mount_change"]) → 读到战斗开始 + 骑乘变化
+3. AI 调用 get_condition → 确认当前不在骑乘状态
+4. AI 对比: wasMounted=true, mount_change 事件存在, 当前未骑乘 → 功能正常 ✓
+```
+
+### AI 交互式调试
+
+AI 操控角色并观察事件反馈，验证插件响应：
+
+```
+1. AI: set_target(name="木人") + execute_action(2241)    → 开始攻击
+2. AI: query_events(types=["combat_start","combat_damage"]) → 确认进入战斗、造成伤害
+3. AI: 等待 3 秒
+4. AI: query_events(since=上一步时间) → 检查期间事件是否符合预期
+5. AI: get_target_info → 确认木人HP变化
+```
+
 ## 其他插件接入
 
 ```csharp
-// 推送数据到 MCP
 var sub = pluginInterface.GetIpcSubscriber<string, object?>("MCPforDalamud.PushData");
 sub.InvokeFunc("{\"key\":\"mykey\",\"data\":\"some data\"}");
 ```

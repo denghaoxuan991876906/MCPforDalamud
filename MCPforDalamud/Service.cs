@@ -24,7 +24,6 @@ public class Service
     [PluginService] public static IAetheryteList AetheryteList { get; private set; } = null!;
     [PluginService] public static IPluginLog PluginLog { get; private set; } = null!;
     [PluginService] public static ICommandManager CommandManager { get; private set; } = null!;
-    [PluginService] public static ISigScanner SigScanner { get; private set; } = null!;
 
     public static void Initialize(IDalamudPluginInterface pluginInterface)
     {

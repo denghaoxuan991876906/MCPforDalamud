@@ -59,12 +59,12 @@ jobs:
         run: Get-ChildItem .\build\* -Exclude MCPforDalamud.* | Remove-Item -Force -Recurse
 
       - name: Zip plugin
-        run: Compress-Archive -Path .\build\* -DestinationPath .\build\MCPforDalamud.zip
+        run: Compress-Archive -Path .\build\MCPforDalamud.* -DestinationPath .\build\latest.zip
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          files: ./build/MCPforDalamud.zip
+          files: ./build/latest.zip
 
       - name: Publish to DalamudPlugins meta repo
         if: ${{ env.HAS_PAT == 'true' }}
@@ -73,7 +73,7 @@ jobs:
         run: |
           $meta = "denghaoxuan991876906/DalamudPlugins"
           $releaseTag = "MCPforDalamud-v$env:VERSION"
-          $zip = "build/MCPforDalamud.zip"
+          $zip = "build/latest.zip"
           gh release view $releaseTag --repo $meta *> $null
           if ($LASTEXITCODE -eq 0) {
             gh release upload $releaseTag $zip --repo $meta --clobber

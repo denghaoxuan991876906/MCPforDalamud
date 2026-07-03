@@ -4,6 +4,9 @@ on:
     tags:
       - '*.*.*.*'
 
+env:
+  HAS_PAT: ${{ secrets.DALAMUDPLUGINS_PAT != '' }}
+
 jobs:
   Release:
     permissions:
@@ -13,10 +16,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
 
-      - name: Get tag
+      - name: Resolve release version
         run: |
-          $tag = "${{ github.ref }}" -replace 'refs/tags/', ''
-          "tag=$tag" | Out-File -Append -FilePath $env:GITHUB_ENV
+          $version = "${{ github.ref_name }}" -replace '^v', ''
+          if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw "Invalid release version: $version" }
+          "VERSION=$version" | Out-File -Append -FilePath $env:GITHUB_ENV
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v5
@@ -31,8 +35,25 @@ jobs:
       - name: Restore
         run: dotnet restore MCPforDalamud/MCPforDalamud.csproj
 
+      - name: Sync manifest version
+        run: |
+          $manifestPath = "MCPforDalamud/MCPforDalamud.json"
+          $json = Get-Content -Raw $manifestPath | ConvertFrom-Json
+          $json.AssemblyVersion = $env:VERSION
+          $json | ConvertTo-Json -Depth 20 | Set-Content -Encoding utf8 $manifestPath
+
+          $manifestVersion = (Get-Content -Raw $manifestPath | ConvertFrom-Json).AssemblyVersion
+          if ($manifestVersion -ne $env:VERSION) { throw "Manifest version sync failed: manifest=$manifestVersion tag=$env:VERSION" }
+
       - name: Build
-        run: dotnet build --no-restore -c Release MCPforDalamud/MCPforDalamud.csproj -p:Version=${{ env.tag }} --output .\build
+        run: dotnet build --no-restore -c Release MCPforDalamud/MCPforDalamud.csproj --output .\build
+
+      - name: Check output versions
+        run: |
+          $projectVersion = (dotnet msbuild MCPforDalamud/MCPforDalamud.csproj -nologo -getProperty:Version | Select-Object -Last 1).Trim()
+          $dll = [Reflection.AssemblyName]::GetAssemblyName((Resolve-Path .\build\MCPforDalamud.dll)).Version.ToString()
+          $manifest = (Get-Content -Raw .\build\MCPforDalamud.json | ConvertFrom-Json).AssemblyVersion
+          if ($projectVersion -ne $env:VERSION -or $dll -ne $env:VERSION -or $manifest -ne $env:VERSION) { throw "Version mismatch: csproj=$projectVersion dll=$dll manifest=$manifest tag=$env:VERSION" }
 
       - name: Cleanup output
         run: Get-ChildItem .\build\* -Exclude MCPforDalamud.* | Remove-Item -Force -Recurse
@@ -44,3 +65,38 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: ./build/MCPforDalamud.zip
+
+      - name: Publish to DalamudPlugins meta repo
+        if: ${{ env.HAS_PAT == 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.DALAMUDPLUGINS_PAT }}
+        run: |
+          $meta = "denghaoxuan991876906/DalamudPlugins"
+          $releaseTag = "MCPforDalamud-v$env:VERSION"
+          $zip = "build/MCPforDalamud.zip"
+          gh release view $releaseTag --repo $meta *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $releaseTag $zip --repo $meta --clobber
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          } else {
+            gh release create $releaseTag $zip --repo $meta --title $releaseTag --target main --generate-notes
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+          $path = "plugins/MCPforDalamud/MCPforDalamud.json"
+          $objJson = gh api "/repos/$meta/contents/$path"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $obj = $objJson | ConvertFrom-Json
+          $data = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(($obj.content -replace '\s', ''))) | ConvertFrom-Json
+          if ($data.AssemblyVersion -eq $env:VERSION) {
+            Write-Host "manifest already at $env:VERSION - skip"
+            exit 0
+          }
+          $data.AssemblyVersion = $env:VERSION
+          $content = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes(($data | ConvertTo-Json -Depth 20) + "`n"))
+          gh api -X PUT "/repos/$meta/contents/$path" `
+            -f "message=chore(publish): MCPforDalamud v$env:VERSION" `
+            -f "content=$content" `
+            -f "sha=$($obj.sha)" `
+            -f "branch=main"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

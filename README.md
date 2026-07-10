@@ -2,15 +2,28 @@
 
 让 AI 工具通过 MCP (Model Context Protocol) 实时获取 FFXIV 游戏数据、操控角色、与开发中插件交互。
 
+支持 MCP Streamable HTTP JSON-RPC 请求，协议版本最高为 `2025-11-25`。端点为 `http://127.0.0.1:{port}/mcp`。
+
 ## 快速开始
 
 ### 构建
 
 ```bash
-cmd.exe /c "cd /d E:\MCPforDalamud && dotnet build MCPforDalamud\MCPforDalamud.csproj"
+dotnet restore MCPforDalamud.slnx --locked-mode
+dotnet build MCPforDalamud.slnx
 ```
 
-输出: `MCPforDalamud\bin\Debug\MCPforDalamud.dll`
+Debug 输出：`MCPforDalamud/bin/Debug/MCPforDalamud.dll`
+
+Release 插件包：
+
+```bash
+dotnet build MCPforDalamud/MCPforDalamud.csproj -c Release
+```
+
+输出：`MCPforDalamud/bin/Release/MCPforDalamud/latest.zip`
+
+CI 使用 Windows 托管 runner，并从 Dalamud 官方分发地址下载最新 Hooks 后执行构建和打包校验。
 
 ### 安装
 
@@ -20,9 +33,11 @@ cmd.exe /c "cd /d E:\MCPforDalamud && dotnet build MCPforDalamud\MCPforDalamud.c
 
 `/mcp` 打开设置面板。
 
-## 工具列表 (45个)
+## 工具列表（全部权限启用时 42 个）
 
-**数据读取** (22): get_player_status, get_condition, get_player_stats, get_job_gauge, get_target_info, get_focus_target, get_soft_target, get_enemy_list, get_party_list, get_buddy_list, get_nearby_players, get_nearby_npcs, get_territory_info, get_aetheryte_list, get_fate_list, get_duty_state, get_inventory, get_equipment, get_currency, list_excel_sheets, search_excel_sheet, get_excel_row
+读取、事件和 IPC Bridge 工具默认可用。角色操作、移动、聊天和插件管理默认关闭，需在 `/mcp` 设置窗口中分别启用；权限变化会自动重启本地 MCP 服务。
+
+**数据读取** (21): get_player_status, get_condition, get_player_stats, get_target_info, get_focus_target, get_soft_target, get_enemy_list, get_party_list, get_buddy_list, get_nearby_players, get_nearby_npcs, get_territory_info, get_aetheryte_list, get_fate_list, get_duty_state, get_inventory, get_equipment, get_currency, list_excel_sheets, search_excel_sheet, get_excel_row
 
 **角色操控** (10): execute_action, use_general_action, set_target, set_focus_target, interact_with_target, dismount, cancel_cast, accept_raise, toggle_sprint, jump
 
@@ -34,7 +49,7 @@ cmd.exe /c "cd /d E:\MCPforDalamud && dotnet build MCPforDalamud\MCPforDalamud.c
 
 **聊天** (1): send_chat
 
-**移动** (4): automove_on, automove_off, face_target, move_to_target
+**移动** (2): toggle_automove, face_target
 
 ## 插件管理
 
@@ -68,7 +83,7 @@ manage_plugin:
   before: int          可选，截止时间戳(ms)
 ```
 
-### 事件类型（21种）
+### 事件类型（17种）
 
 | 类型 | 说明 | 触发 |
 |------|------|------|
@@ -79,20 +94,16 @@ manage_plugin:
 | `job_change` | 职业切换 | ClassJob.RowId 变化 |
 | `target_change` | 目标切换 | Target GameObjectId 变化 |
 | `focus_target_change` | 焦点目标切换 | FocusTarget 变化 |
-| `combat_action` | 技能执行 | 角色或目标使用技能 |
-| `combat_damage` | 伤害事件 | 目标HP下降 |
-| `combat_buff` | Buff变化 | StatusList 增删 |
-| `combat_cast` | 施法事件 | 开始或取消施法 |
+| `target_hp_change` | 目标HP变化 | 当前目标HP变化 |
+| `combat_damage` | 受伤事件 | 玩家HP下降 |
 | `combat_start` | 战斗开始 | Condition.InCombat 变 true |
 | `combat_end` | 战斗结束 | Condition.InCombat 变 false |
 | `map_change` | 地图切换 | TerritoryType 变化 |
 | `mount_change` | 骑乘切换 | Condition.Mounted 变化 |
-| `chat_message` | 聊天消息 | 收到聊天消息 |
 | `duty_update` | 副本状态变化 | DutyState.IsDutyStarted 变化 |
 | `fate_update` | FATE状态变化 | 附近FATE增删或进度变化 |
 | `nearby_enemy` | 周围敌人 | 检测范围内敌对目标变化 |
 | `nearby_player` | 周围玩家 | 检测范围内玩家增删 |
-| `system_notification` | 系统通知 | 过场动画、任务更新等 |
 
 ### configure_event_collection
 
@@ -100,13 +111,13 @@ manage_plugin:
 
 ```
 参数 config 字段:
-  playerStats: string[]     采集的属性 ["hp","mp","job","position"]，默认全开
+  playerStats: string[]     采集的属性 ["hp","mp","gp","job","position"]，默认全开
   targetStats: string[]     目标属性 ["hp","type","targetChange"]，默认全开
   objectRange: int          环境检测范围(米)，默认30，0=关闭
-  objectTypes: string[]     环境对象类型 ["enemy","player","npc","gathering"]，默认["enemy"]
+  objectTypes: string[]     环境对象类型，目前支持 ["enemy"]
   nearbyPlayerRange: int    周围玩家检测范围(米)，默认0(关闭)
-  combatEvents: string[]    战斗事件 ["action","damage","buff","cast","startEnd"]，默认["action","damage","startEnd"]
-  systemEvents: string[]    系统事件 ["duty","fate","chat","item","quest"]，默认["duty","fate"]
+  combatEvents: string[]    战斗事件 ["damage","startEnd"]，默认全部启用
+  systemEvents: string[]    系统事件 ["duty","fate"]，默认全部启用
   throttleMs: int           同类事件最小间隔(ms)，默认500
 ```
 
@@ -171,7 +182,7 @@ call_plugin_ipc:
   参数:
     pluginName: "BossModReborn"
     methodName: "Presets.GetActive"
-    arguments:  {}              可选JSON参数
+    arguments:  {"value": true} 可选；单参数签名统一使用 value
   返回:
     success: boolean
     result:  string             调用返回值
@@ -186,6 +197,8 @@ call_plugin_ipc:
 | `Func_int_string` | 入参 int，返回 string |
 | `Action_bool` | 入参 bool，无返回 |
 | `Func_bool_string` | 入参 bool，返回 string |
+
+注册的端点会保存到插件配置。`Func_bool` 和 `Func_string` 不接受参数；其余单参数签名通过 `arguments.value` 传值，例如 `{"arguments":{"value":42}}`。
 
 ## 典型用例
 

@@ -27,7 +27,7 @@ public class ToolRegistry
     public object? CallTool(string name, JsonElement? arguments)
     {
         if (!_tools.TryGetValue(name, out var tool))
-            throw new InvalidOperationException(string.Format("未找到工具: {0}", name));
+            throw new ToolNotFoundException(name);
 
         object? result = null;
         Exception? capturedException = null;
@@ -49,4 +49,9 @@ public class ToolRegistry
 
         return result;
     }
+}
+
+public sealed class ToolNotFoundException : Exception
+{
+    public ToolNotFoundException(string name) : base(string.Format("未找到工具: {0}", name)) { }
 }

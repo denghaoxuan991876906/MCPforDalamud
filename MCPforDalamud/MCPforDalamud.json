@@ -4,7 +4,7 @@
     "Punchline": "MCP服务插件",
     "Description": "MCP(Model Context Protocol)服务插件，让AI工具获取FFXIV游戏实时数据、操作角色/系统，以及与插件交互测试。",
     "InternalName": "MCPforDalamud",
-    "AssemblyVersion": "0.1.1.2",
+    "AssemblyVersion": "0.2.0.0",
     "ApplicableVersion": "any",
     "Tags": ["utility", "mcp", "ai", "development"],
     "DalamudApiLevel": 15,
@@ -13,5 +13,5 @@
     "CanUnloadAsync": false,
     "LoadPriority": 0,
     "IconUrl": "",
-    "Changelog": "预览版：44个MCP工具"
+    "Changelog": "0.2.0：标准 MCP、IPC/事件修复、危险工具权限、API 15 清理与可恢复服务启动"
 }

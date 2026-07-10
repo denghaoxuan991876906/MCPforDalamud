@@ -51,9 +51,22 @@ public class JsonRpcError
 public static class JsonRpcErrorCodes
 {
     public const int ParseError = -32700;
+    public const int InvalidRequest = -32600;
     public const int MethodNotFound = -32601;
     public const int InvalidParams = -32602;
     public const int InternalError = -32603;
     public const int GameNotReady = -32000;
     public const int IpcNotAvailable = -32001;
+}
+
+public static class McpProtocol
+{
+    public const string LatestVersion = "2025-11-25";
+    public static readonly string[] SupportedVersions =
+    {
+        LatestVersion,
+        "2025-06-18",
+        "2025-03-26",
+        "2024-11-05"
+    };
 }

@@ -8,14 +8,19 @@ namespace MCPforDalamud.Events;
 
 public class EventCollector : IDisposable
 {
+    private const byte EnemyBattleNpcKind = 2;
     private readonly EventBuffer _buffer;
     private EventCollectionConfig _config;
-    private uint _lastHp, _lastMp;
+    private uint _lastHp, _lastMp, _lastGp, _lastTargetHp;
     private uint _lastJobId;
     private Vector3 _lastPosition;
     private ulong _lastTargetId, _lastFocusTargetId;
     private ushort _lastTerritoryId;
     private bool _lastInCombat, _lastMounted, _lastDutyStarted;
+    private bool _initialized;
+    private HashSet<ulong> _nearbyEnemyIds = new();
+    private HashSet<ulong> _nearbyPlayerIds = new();
+    private Dictionary<uint, byte> _fateProgress = new();
     private readonly Dictionary<string, long> _lastEventTime = new();
     private static readonly DateTime Epoch = new(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
@@ -29,37 +34,62 @@ public class EventCollector : IDisposable
         Service.Framework.Update += OnUpdate;
     }
 
-    public void UpdateConfig(EventCollectionConfig config) { _config = config; }
+    public void UpdateConfig(EventCollectionConfig config) { _config = config; _initialized = false; }
 
     private void OnUpdate(IFramework framework)
     {
-        if (!Service.IsReady) return;
+        if (!Service.IsReady) { _initialized = false; return; }
         var now = NowMs();
         var lp = Service.ObjectTable.LocalPlayer;
         if (lp == null) return;
+        if (!_initialized)
+        {
+            InitializeSnapshot(lp);
+            _initialized = true;
+            return;
+        }
         CollectPlayerStats(lp, now);
         CollectTargetStats(now);
         CollectCombatEvents(now);
         CollectMapEvents(now);
         CollectObjects(now, lp);
+        CollectFates(now);
+    }
+
+    private void InitializeSnapshot(IPlayerCharacter lp)
+    {
+        _lastHp = lp.CurrentHp;
+        _lastMp = lp.CurrentMp;
+        _lastGp = lp.CurrentGp;
+        _lastJobId = lp.ClassJob.Value.RowId;
+        _lastPosition = lp.Position;
+        var target = Service.TargetManager.Target;
+        _lastTargetId = target?.GameObjectId ?? 0;
+        _lastTargetHp = (target as ICharacter)?.CurrentHp ?? 0;
+        _lastFocusTargetId = Service.TargetManager.FocusTarget?.GameObjectId ?? 0;
+        _lastTerritoryId = (ushort)Service.ClientState.TerritoryType;
+        _lastInCombat = Service.Condition[ConditionFlag.InCombat];
+        _lastMounted = Service.Condition[ConditionFlag.Mounted];
+        _lastDutyStarted = Service.DutyState.IsDutyStarted;
+        _nearbyEnemyIds = GetNearbyCharacters(lp, _config.ObjectRange, false).Select(x => x.Id).ToHashSet();
+        _nearbyPlayerIds = GetNearbyCharacters(lp, _config.NearbyPlayerRange, true).Select(x => x.Id).ToHashSet();
+        _fateProgress = GetFateProgress();
+        _lastEventTime.Clear();
     }
 
     private void CollectPlayerStats(IPlayerCharacter lp, long now)
     {
         if (_config.HasPlayerStat("hp") && _lastHp != lp.CurrentHp)
         {
+            var from = _lastHp;
+            var to = lp.CurrentHp;
             if (!TryThrottle(EventTypes.HpChange, now))
             {
-                var from = _lastHp;
-                var to = lp.CurrentHp;
-                if (from > 0 && from != to)
-                {
-                    _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.HpChange, Data = new { from, to, max = lp.MaxHp } });
-                    if (from > to)
-                        _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.CombatDamage, Data = new { amount = from - to, currentHp = to, maxHp = lp.MaxHp } });
-                }
-                _lastHp = lp.CurrentHp;
+                _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.HpChange, Data = new { from, to, max = lp.MaxHp } });
+                if (_config.HasCombatEvent("damage") && from > to)
+                    _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.CombatDamage, Data = new { source = "player", amount = from - to, currentHp = to, maxHp = lp.MaxHp } });
             }
+            _lastHp = to;
         }
         else if (!_config.HasPlayerStat("hp")) { _lastHp = lp.CurrentHp; }
 
@@ -69,6 +99,14 @@ public class EventCollector : IDisposable
                 _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.MpChange, Data = new { from = _lastMp, to = lp.CurrentMp, max = lp.MaxMp } });
             _lastMp = lp.CurrentMp;
         }
+
+        if (_config.HasPlayerStat("gp") && _lastGp != lp.CurrentGp)
+        {
+            if (!TryThrottle(EventTypes.GpChange, now))
+                _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.GpChange, Data = new { from = _lastGp, to = lp.CurrentGp, max = lp.MaxGp } });
+            _lastGp = lp.CurrentGp;
+        }
+        else if (!_config.HasPlayerStat("gp")) { _lastGp = lp.CurrentGp; }
 
         if (_config.HasPlayerStat("job") && _lastJobId != lp.ClassJob.Value.RowId)
         {
@@ -89,20 +127,29 @@ public class EventCollector : IDisposable
 
     private void CollectTargetStats(long now)
     {
-        if (!_config.HasTargetStat("targetChange")) return;
         var t = Service.TargetManager.Target;
         var newTargetId = t?.GameObjectId ?? 0u;
         var newFocusId = Service.TargetManager.FocusTarget?.GameObjectId ?? 0u;
-        if (_lastTargetId != newTargetId)
+        if (_config.HasTargetStat("targetChange") && _lastTargetId != newTargetId)
         {
             _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.TargetChange, Data = new { from = _lastTargetId, to = newTargetId, name = t?.Name.TextValue ?? "", kind = t?.ObjectKind.ToString() ?? "" } });
             _lastTargetId = newTargetId;
+            _lastTargetHp = (t as ICharacter)?.CurrentHp ?? 0;
         }
         if (_lastFocusTargetId != newFocusId)
         {
             _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.FocusTargetChange, Data = new { from = _lastFocusTargetId, to = newFocusId } });
             _lastFocusTargetId = newFocusId;
         }
+        var targetCharacter = t as ICharacter;
+        var targetHp = targetCharacter?.CurrentHp ?? 0;
+        if (_config.HasTargetStat("hp") && newTargetId == _lastTargetId && targetHp != _lastTargetHp)
+        {
+            if (!TryThrottle(EventTypes.TargetHpChange, now))
+                _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.TargetHpChange, Data = new { targetId = newTargetId, from = _lastTargetHp, to = targetHp, max = targetCharacter?.MaxHp ?? 0 } });
+            _lastTargetHp = targetHp;
+        }
+        _lastTargetId = newTargetId;
     }
 
     private void CollectCombatEvents(long now)
@@ -129,22 +176,76 @@ public class EventCollector : IDisposable
 
     private void CollectObjects(long now, IPlayerCharacter lp)
     {
-        if (_config.ObjectRange <= 0) return;
-        var enemies = new List<object>();
         if (_config.HasObjectType("enemy"))
         {
-            foreach (var o in Service.ObjectTable)
+            var enemies = GetNearbyCharacters(lp, _config.ObjectRange, false);
+            var ids = enemies.Select(enemy => enemy.Id).ToHashSet();
+            if (!ids.SetEquals(_nearbyEnemyIds) && !TryThrottle(EventTypes.NearbyEnemy, now))
             {
-                if (o == null || o == lp) continue;
-                var dist = Vector3.Distance(lp.Position, o.Position);
-                if (dist > _config.ObjectRange) continue;
-                var chara = o as ICharacter;
-                if (chara == null || chara.MaxHp == 0) continue;
-                enemies.Add(new { name = o.Name.TextValue, id = o.GameObjectId, hp = chara.CurrentHp, maxHp = chara.MaxHp, distance = Math.Round(dist, 1) });
+                _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.NearbyEnemy, Data = new { range = _config.ObjectRange, count = enemies.Count, added = ids.Except(_nearbyEnemyIds).ToArray(), removed = _nearbyEnemyIds.Except(ids).ToArray(), enemies } });
+                _nearbyEnemyIds = ids;
             }
         }
-        if (enemies.Count > 0)
-            _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.NearbyEnemy, Data = new { range = _config.ObjectRange, count = enemies.Count, enemies } });
+
+        if (_config.NearbyPlayerRange > 0)
+        {
+            var players = GetNearbyCharacters(lp, _config.NearbyPlayerRange, true);
+            var ids = players.Select(player => player.Id).ToHashSet();
+            if (!ids.SetEquals(_nearbyPlayerIds) && !TryThrottle(EventTypes.NearbyPlayer, now))
+            {
+                _buffer.Add(new EventRecord { Timestamp = now, Type = EventTypes.NearbyPlayer, Data = new { range = _config.NearbyPlayerRange, count = players.Count, added = ids.Except(_nearbyPlayerIds).ToArray(), removed = _nearbyPlayerIds.Except(ids).ToArray(), players } });
+                _nearbyPlayerIds = ids;
+            }
+        }
+    }
+
+    private List<NearbyCharacter> GetNearbyCharacters(IPlayerCharacter lp, int range, bool playersOnly)
+    {
+        if (range <= 0) return new List<NearbyCharacter>();
+        var result = new List<NearbyCharacter>();
+        foreach (var gameObject in Service.ObjectTable)
+        {
+            if (gameObject == null || gameObject.GameObjectId == lp.GameObjectId) continue;
+            var character = gameObject as ICharacter;
+            if (character == null) continue;
+            var isPlayer = gameObject is IPlayerCharacter;
+            if (playersOnly != isPlayer) continue;
+            if (!playersOnly && (gameObject is not IBattleNpc battleNpc || (byte)battleNpc.BattleNpcKind != EnemyBattleNpcKind)) continue;
+            var distance = Vector3.Distance(lp.Position, gameObject.Position);
+            if (distance > range) continue;
+            result.Add(new NearbyCharacter(gameObject.GameObjectId, gameObject.Name.TextValue, character.CurrentHp, character.MaxHp, Math.Round(distance, 1)));
+        }
+        return result;
+    }
+
+    private void CollectFates(long now)
+    {
+        if (!_config.HasSystemEvent("fate")) return;
+        var current = GetFateProgress();
+        if (current.Count == _fateProgress.Count && current.All(pair => _fateProgress.TryGetValue(pair.Key, out var progress) && progress == pair.Value)) return;
+        if (TryThrottle(EventTypes.FateUpdate, now)) return;
+        _buffer.Add(new EventRecord
+        {
+            Timestamp = now,
+            Type = EventTypes.FateUpdate,
+            Data = new
+            {
+                added = current.Keys.Except(_fateProgress.Keys).ToArray(),
+                removed = _fateProgress.Keys.Except(current.Keys).ToArray(),
+                fates = current.Select(pair => new { fateId = pair.Key, progress = pair.Value }).ToArray()
+            }
+        });
+        _fateProgress = current;
+    }
+
+    private static Dictionary<uint, byte> GetFateProgress()
+    {
+        var result = new Dictionary<uint, byte>();
+        foreach (var fate in Service.FateTable)
+        {
+            if (fate != null) result[fate.FateId] = fate.Progress;
+        }
+        return result;
     }
 
     private bool TryThrottle(string type, long now)
@@ -157,4 +258,6 @@ public class EventCollector : IDisposable
     private static long NowMs() => (long)(DateTime.UtcNow - Epoch).TotalMilliseconds;
 
     public void Dispose() { Service.Framework.Update -= OnUpdate; }
+
+    private sealed record NearbyCharacter(ulong Id, string Name, uint CurrentHp, uint MaxHp, double Distance);
 }

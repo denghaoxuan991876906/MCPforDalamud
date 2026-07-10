@@ -1,31 +1,55 @@
 name: Build
+
 on:
   push:
-    branches:
-      - master
+    branches: [master]
   pull_request:
-    branches:
-      - master
+    branches: [master]
+  workflow_dispatch:
 
 jobs:
-  Build:
+  build:
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
+      - uses: actions/checkout@v6
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v5
+      - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: 10.0.x
 
       - name: Download Dalamud Hooks
+        shell: pwsh
         run: |
           Invoke-WebRequest -Uri https://goatcorp.github.io/dalamud-distrib/latest.zip -OutFile dalamud.zip
           Expand-Archive -Force dalamud.zip "$env:AppData\XIVLauncherCN\addon\Hooks\dev"
 
       - name: Restore
-        run: dotnet restore MCPforDalamud/MCPforDalamud.csproj
+        run: dotnet restore MCPforDalamud.slnx --locked-mode
 
-      - name: Build
-        run: dotnet build --no-restore -c Release MCPforDalamud/MCPforDalamud.csproj
+      - name: Build plugin
+        run: dotnet build MCPforDalamud/MCPforDalamud.csproj -c Release --no-restore
+
+      - name: Verify package
+        shell: pwsh
+        run: |
+          $manifest = Get-Content MCPforDalamud/MCPforDalamud.json -Raw | ConvertFrom-Json
+          $assembly = [Reflection.AssemblyName]::GetAssemblyName((Resolve-Path 'MCPforDalamud/bin/Release/MCPforDalamud.dll'))
+          if ($assembly.Version.ToString() -ne $manifest.AssemblyVersion) {
+            throw "Assembly version $($assembly.Version) does not match manifest $($manifest.AssemblyVersion)."
+          }
+          $zip = Resolve-Path 'MCPforDalamud/bin/Release/MCPforDalamud/latest.zip'
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $archive = [IO.Compression.ZipFile]::OpenRead($zip)
+          try {
+            $names = $archive.Entries.Name
+            if ('MCPforDalamud.dll' -notin $names -or 'MCPforDalamud.json' -notin $names) {
+              throw 'Plugin package is missing the DLL or manifest.'
+            }
+          } finally { $archive.Dispose() }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MCPforDalamud
+          path: MCPforDalamud/bin/Release/MCPforDalamud/latest.zip
+          if-no-files-found: error

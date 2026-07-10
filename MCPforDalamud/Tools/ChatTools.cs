@@ -7,8 +7,14 @@ namespace MCPforDalamud.Tools;
 
 public static class ChatTools
 {
+    private static readonly CancellationTokenSource PendingOperations = new();
+
+    public static void CancelPending() => PendingOperations.Cancel();
+
     public static void Register(ToolRegistry registry)
     {
+        if (Plugin.Instance?.Config.AllowChat == true)
+        {
         registry.Register(new ToolDefinition
         {
             Name = "send_chat",
@@ -34,7 +40,10 @@ public static class ChatTools
                 };
             }
         });
+        }
 
+        if (Plugin.Instance?.Config.AllowPluginManagement == true)
+        {
         registry.Register(new ToolDefinition
         {
             Name = "manage_plugin",
@@ -67,6 +76,7 @@ public static class ChatTools
                 };
             }
         });
+        }
     }
 
     private static bool SendAsChat(string message)
@@ -85,7 +95,8 @@ public static class ChatTools
 
     private static object HandleUnload(string pluginName)
     {
-        if (string.IsNullOrEmpty(pluginName)) return new { error = "请提供 pluginName" };
+        if (!IsValidPluginName(pluginName)) return new { error = "pluginName 只能包含字母、数字、点、下划线和连字符" };
+        if (pluginName.Equals("MCPforDalamud", StringComparison.OrdinalIgnoreCase)) return new { error = "不能在当前 MCP 请求中卸载自身" };
         var cmd = string.Format("/xlplugins disable {0}", pluginName);
         var ok = SendAsChat(cmd);
         return new { success = ok, action = "unload", pluginName };
@@ -93,7 +104,7 @@ public static class ChatTools
 
     private static object HandleLoad(string pluginName, string filePath)
     {
-        if (string.IsNullOrEmpty(filePath)) return new { error = "请提供 filePath（插件DLL的完整路径）" };
+        if (!TryValidateDllPath(filePath, out filePath, out var error)) return new { error };
         var cmd = string.Format("/xldev load \"{0}\"", filePath);
         var ok = SendAsChat(cmd);
         return new { success = ok, action = "load", filePath };
@@ -101,24 +112,51 @@ public static class ChatTools
 
     private static object HandleReload(string pluginName, string filePath)
     {
-        if (!string.IsNullOrEmpty(pluginName))
-        {
-            SendAsChat(string.Format("/xlplugins disable {0}", pluginName));
-            System.Threading.Thread.Sleep(500);
-        }
-        if (!string.IsNullOrEmpty(filePath))
-        {
-            var cmd = string.Format("/xldev load \"{0}\"", filePath);
-            var ok = SendAsChat(cmd);
-            return new { success = ok, action = "reload", pluginName, filePath };
-        }
-        return new { success = false, error = "请提供 filePath 或 pluginName" };
+        if (!IsValidPluginName(pluginName)) return new { success = false, error = "reload 需要有效的 pluginName" };
+        if (pluginName.Equals("MCPforDalamud", StringComparison.OrdinalIgnoreCase)) return new { success = false, error = "不能在当前 MCP 请求中重载自身" };
+        if (!TryValidateDllPath(filePath, out filePath, out var error)) return new { success = false, error };
+        if (!SendAsChat(string.Format("/xlplugins disable {0}", pluginName))) return new { success = false, error = "卸载命令发送失败" };
+        ScheduleLoad(filePath);
+        return new { success = true, scheduled = true, action = "reload", pluginName, filePath };
     }
 
     private static object HandleReloadAll()
     {
         var ok = SendAsChat("/xlplugins reload");
         return new { success = ok, action = "reload_all" };
+    }
+
+    internal static bool IsValidPluginName(string value) =>
+        !string.IsNullOrWhiteSpace(value) && value.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '.' or '_' or '-');
+
+    internal static bool TryValidateDllPath(string value, out string fullPath, out string error)
+    {
+        fullPath = string.Empty;
+        error = string.Empty;
+        try
+        {
+            if (string.IsNullOrWhiteSpace(value) || value.IndexOfAny(new[] { '\r', '\n', '"' }) >= 0)
+                throw new ArgumentException("filePath 无效");
+            fullPath = Path.GetFullPath(value);
+            if (!Path.GetExtension(fullPath).Equals(".dll", StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("filePath 必须是 DLL 文件");
+            if (!File.Exists(fullPath)) throw new FileNotFoundException("DLL 文件不存在", fullPath);
+            return true;
+        }
+        catch (Exception ex) { error = ex.Message; return false; }
+    }
+
+    private static void ScheduleLoad(string filePath)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await Task.Delay(500, PendingOperations.Token).ConfigureAwait(false);
+                await Service.Framework.RunOnFrameworkThread(() => SendAsChat(string.Format("/xldev load \"{0}\"", filePath)));
+            }
+            catch (OperationCanceledException) when (PendingOperations.IsCancellationRequested) { }
+            catch (Exception ex) { Service.PluginLog.Error(ex, "延迟加载插件失败"); }
+        });
     }
 
 }

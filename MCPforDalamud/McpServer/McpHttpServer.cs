@@ -7,10 +7,13 @@ namespace MCPforDalamud.McpServer;
 
 public class McpHttpServer : IDisposable
 {
+    private const int MaxRequestBodyBytes = 1024 * 1024;
     private readonly ToolRegistry _toolRegistry;
     private HttpListener? _listener;
     private readonly CancellationTokenSource _cts = new();
     private Thread? _listenThread;
+    private readonly string _host;
+    private readonly SemaphoreSlim _requestSlots = new(8, 8);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -24,6 +27,7 @@ public class McpHttpServer : IDisposable
     public McpHttpServer(ToolRegistry toolRegistry, string host = "127.0.0.1", int port = 0)
     {
         _toolRegistry = toolRegistry;
+        _host = host;
 
         if (port == 0)
         {
@@ -45,7 +49,7 @@ public class McpHttpServer : IDisposable
     public void Start()
     {
         _listener = new HttpListener();
-        _listener.Prefixes.Add(string.Format("http://127.0.0.1:{0}/", Port));
+        _listener.Prefixes.Add(string.Format("http://{0}:{1}/", _host, Port));
         _listener.Start();
 
         _listenThread = new Thread(ListenLoop)
@@ -63,7 +67,7 @@ public class McpHttpServer : IDisposable
             try
             {
                 var context = _listener!.GetContext();
-                ThreadPool.QueueUserWorkItem(_ => HandleRequest(context));
+                _ = HandleRequestAsync(context);
             }
             catch (HttpListenerException) when (_cts.IsCancellationRequested)
             {
@@ -73,13 +77,19 @@ public class McpHttpServer : IDisposable
             {
                 break;
             }
+            catch (Exception ex)
+            {
+                Service.PluginLog.Error(ex, "MCP HTTP listener stopped unexpectedly");
+                break;
+            }
         }
     }
 
-    private async void HandleRequest(HttpListenerContext context)
+    private async Task HandleRequestAsync(HttpListenerContext context)
     {
         var request = context.Request;
         var response = context.Response;
+        var slotAcquired = false;
 
         try
         {
@@ -97,13 +107,44 @@ public class McpHttpServer : IDisposable
                 return;
             }
 
+            if (request.ContentLength64 > MaxRequestBodyBytes)
+            {
+                response.StatusCode = 413;
+                response.Close();
+                return;
+            }
+
+            await _requestSlots.WaitAsync(_cts.Token);
+            slotAcquired = true;
             string body;
             using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
             {
-                body = await reader.ReadToEndAsync();
+                var readBuffer = new char[8192];
+                var builder = new StringBuilder();
+                var bodyBytes = 0;
+                int read;
+                while ((read = await reader.ReadAsync(readBuffer, _cts.Token)) > 0)
+                {
+                    builder.Append(readBuffer, 0, read);
+                    bodyBytes += Encoding.UTF8.GetByteCount(readBuffer.AsSpan(0, read));
+                    if (bodyBytes > MaxRequestBodyBytes)
+                    {
+                        response.StatusCode = 413;
+                        response.Close();
+                        return;
+                    }
+                }
+                body = builder.ToString();
             }
 
             var jsonResult = ProcessRequest(body);
+
+            if (jsonResult == null)
+            {
+                response.StatusCode = 202;
+                response.Close();
+                return;
+            }
 
             response.ContentType = "application/json; charset=utf-8";
             response.StatusCode = 200;
@@ -113,8 +154,13 @@ public class McpHttpServer : IDisposable
             await response.OutputStream.WriteAsync(buffer);
             response.OutputStream.Close();
         }
-        catch
+        catch (OperationCanceledException) when (_cts.IsCancellationRequested)
         {
+            try { response.Close(); } catch { }
+        }
+        catch (Exception ex)
+        {
+            Service.PluginLog.Error(ex, "MCP HTTP request failed");
             try
             {
                 response.StatusCode = 500;
@@ -122,34 +168,54 @@ public class McpHttpServer : IDisposable
             }
             catch { }
         }
+        finally { if (slotAcquired) _requestSlots.Release(); }
     }
 
-    internal string ProcessRequest(string body)
+    internal string? ProcessRequest(string body)
     {
-        JsonRpcRequest? jsonRpcRequest;
+        JsonElement root;
         try
         {
-            jsonRpcRequest = JsonSerializer.Deserialize<JsonRpcRequest>(body, JsonOptions);
+            root = JsonDocument.Parse(body).RootElement.Clone();
         }
         catch (JsonException)
         {
             return BuildErrorResponse(null, JsonRpcErrorCodes.ParseError, "请求体不是有效的 JSON");
         }
 
-        if (jsonRpcRequest == null)
+        if (root.ValueKind != JsonValueKind.Object)
         {
-            return BuildErrorResponse(null, JsonRpcErrorCodes.ParseError, "请求体为空");
+            return BuildErrorResponse(null, JsonRpcErrorCodes.InvalidRequest, "请求必须是 JSON 对象");
         }
 
-        if (jsonRpcRequest.Method != "tools/list" && jsonRpcRequest.Method != "tools/call")
+        var id = root.TryGetProperty("id", out var idValue) ? idValue.Clone() : (JsonElement?)null;
+        var isNotification = !id.HasValue;
+        if (!root.TryGetProperty("jsonrpc", out var version) || version.GetString() != "2.0" ||
+            !root.TryGetProperty("method", out var methodValue) || methodValue.ValueKind != JsonValueKind.String)
         {
-            return BuildErrorResponse(jsonRpcRequest.Id, JsonRpcErrorCodes.MethodNotFound,
-                string.Format("未知方法: {0}", jsonRpcRequest.Method));
+            return isNotification ? null : BuildErrorResponse(id, JsonRpcErrorCodes.InvalidRequest, "无效的 JSON-RPC 2.0 请求");
+        }
+
+        var method = methodValue.GetString()!;
+        JsonElement? parameters = root.TryGetProperty("params", out var paramsValue) ? paramsValue.Clone() : null;
+
+        if (isNotification)
+        {
+            if (method == "notifications/initialized" || method == "notifications/cancelled") return null;
+            return null;
         }
 
         try
         {
-            if (jsonRpcRequest.Method == "tools/list")
+            if (method == "initialize")
+            {
+                return BuildSuccessResponse(id, BuildInitializeResult(parameters));
+            }
+            if (method == "ping")
+            {
+                return BuildSuccessResponse(id, JsonSerializer.SerializeToElement(new { }));
+            }
+            if (method == "tools/list")
             {
                 var tools = _toolRegistry.ListTools();
                 var toolList = tools.Select(t => new
@@ -164,44 +230,80 @@ public class McpHttpServer : IDisposable
                 }).ToArray();
 
                 var result = JsonSerializer.SerializeToElement(new { tools = toolList }, JsonOptions);
-                return BuildSuccessResponse(jsonRpcRequest.Id, result);
+                return BuildSuccessResponse(id, result);
             }
-            else
+            if (method == "tools/call")
             {
-                if (jsonRpcRequest.Params == null)
+                if (parameters is not { ValueKind: JsonValueKind.Object })
                 {
-                    return BuildErrorResponse(jsonRpcRequest.Id, JsonRpcErrorCodes.InvalidParams,
+                    return BuildErrorResponse(id, JsonRpcErrorCodes.InvalidParams,
                         "缺少 params 参数");
                 }
 
-                var toolName = jsonRpcRequest.Params.Value.GetProperty("name").GetString();
+                if (!parameters.Value.TryGetProperty("name", out var nameValue) || nameValue.ValueKind != JsonValueKind.String)
+                    return BuildErrorResponse(id, JsonRpcErrorCodes.InvalidParams, "未指定有效的工具名称");
+                var toolName = nameValue.GetString();
                 JsonElement? arguments = null;
 
-                if (jsonRpcRequest.Params.Value.TryGetProperty("arguments", out var args))
+                if (parameters.Value.TryGetProperty("arguments", out var args))
                 {
+                    if (args.ValueKind != JsonValueKind.Object)
+                        return BuildErrorResponse(id, JsonRpcErrorCodes.InvalidParams, "arguments 必须是对象");
                     arguments = args;
                 }
 
                 if (string.IsNullOrEmpty(toolName))
                 {
-                    return BuildErrorResponse(jsonRpcRequest.Id, JsonRpcErrorCodes.InvalidParams,
+                    return BuildErrorResponse(id, JsonRpcErrorCodes.InvalidParams,
                         "未指定工具名称");
                 }
 
                 var toolResult = _toolRegistry.CallTool(toolName, arguments);
-                var resultElement = JsonSerializer.SerializeToElement(toolResult, JsonOptions);
-
-                return BuildSuccessResponse(jsonRpcRequest.Id, resultElement);
+                var structured = JsonSerializer.SerializeToElement(toolResult, JsonOptions);
+                var text = JsonSerializer.Serialize(toolResult, JsonOptions);
+                var resultElement = JsonSerializer.SerializeToElement(new
+                {
+                    content = new[] { new { type = "text", text } },
+                    structuredContent = structured,
+                    isError = false
+                }, JsonOptions);
+                return BuildSuccessResponse(id, resultElement);
             }
+            return BuildErrorResponse(id, JsonRpcErrorCodes.MethodNotFound, string.Format("未知方法: {0}", method));
         }
-        catch (InvalidOperationException ex)
+        catch (ToolNotFoundException ex)
         {
-            return BuildErrorResponse(jsonRpcRequest.Id, JsonRpcErrorCodes.MethodNotFound, ex.Message);
+            return BuildErrorResponse(id, JsonRpcErrorCodes.MethodNotFound, ex.Message);
         }
         catch (Exception ex)
         {
-            return BuildErrorResponse(jsonRpcRequest.Id, JsonRpcErrorCodes.InternalError, ex.Message);
+            var resultElement = JsonSerializer.SerializeToElement(new
+            {
+                content = new[] { new { type = "text", text = ex.Message } },
+                isError = true
+            }, JsonOptions);
+            return method == "tools/call"
+                ? BuildSuccessResponse(id, resultElement)
+                : BuildErrorResponse(id, JsonRpcErrorCodes.InternalError, ex.Message);
         }
+    }
+
+    private static JsonElement BuildInitializeResult(JsonElement? parameters)
+    {
+        var requested = parameters is { ValueKind: JsonValueKind.Object } &&
+                        parameters.Value.TryGetProperty("protocolVersion", out var protocol)
+            ? protocol.GetString()
+            : null;
+        var selected = requested != null && McpProtocol.SupportedVersions.Contains(requested)
+            ? requested
+            : McpProtocol.LatestVersion;
+        return JsonSerializer.SerializeToElement(new
+        {
+            protocolVersion = selected,
+            capabilities = new { tools = new { listChanged = false } },
+            serverInfo = new { name = "MCPforDalamud", version = "0.2.0" },
+            instructions = "Provides FFXIV game state and explicitly enabled game-control tools through Dalamud."
+        }, JsonOptions);
     }
 
     private static string BuildSuccessResponse(JsonElement? id, JsonElement result)
@@ -233,7 +335,7 @@ public class McpHttpServer : IDisposable
     public void Stop()
     {
         _cts.Cancel();
-        try { _listener?.Stop(); } catch { }
+        try { _listener?.Close(); } catch { }
         _listenThread?.Join(TimeSpan.FromSeconds(3));
     }
 
@@ -241,6 +343,5 @@ public class McpHttpServer : IDisposable
     {
         Stop();
         _cts.Dispose();
-        (_listener as IDisposable)?.Dispose();
     }
 }

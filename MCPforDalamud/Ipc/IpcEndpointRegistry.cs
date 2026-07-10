@@ -16,6 +16,11 @@ public class IpcEndpointRegistry
 
     public void Register(string pluginName, string methodName, string signature, string description)
     {
+        if (string.IsNullOrWhiteSpace(pluginName)) throw new ArgumentException("pluginName 不能为空");
+        if (string.IsNullOrWhiteSpace(methodName)) throw new ArgumentException("methodName 不能为空");
+        if (!IpcSignatures.Supported.Contains(signature)) throw new ArgumentException($"不支持的 IPC 签名: {signature}");
+        if (pluginName.Any(char.IsWhiteSpace) || methodName.Any(char.IsWhiteSpace))
+            throw new ArgumentException("插件名和方法名不能包含空白字符");
         var key = string.Format("{0}.{1}", pluginName, methodName);
         _endpoints.RemoveAll(e => string.Format("{0}.{1}", e.PluginName, e.MethodName) == key);
         _endpoints.Add(new IpcEndpoint { PluginName = pluginName, MethodName = methodName, Signature = signature, Description = description });
